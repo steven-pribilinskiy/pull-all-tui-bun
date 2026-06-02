@@ -22,15 +22,20 @@ export function StatusBar({ repos, jobs, elapsedMs, filterMode, filterText }: Pr
   const total = repos.length;
   const elapsed = (elapsedMs / 1000).toFixed(1) + 's';
 
-  const filterStr = filterMode ? ` · filter: ${filterText}█` : '';
+  // Row 1 — move & view, or the live filter prompt when filtering.
+  const row1 = filterMode
+    ? `Filter: ${filterText}█`
+    : `j/k ↑/↓ move · g/G top/end · click select · wheel scroll · space result`;
+
+  // Row 2 — act & layout, plus live run stats.
+  const row2 =
+    `r/R retry · / filter · [ ] / drag resize · tab focus · q quit  ·  ` +
+    `${jobs} jobs · ${done}/${total} done · ${running} running · ${elapsed}`;
 
   return (
-    <Box>
-      <Text dimColor>
-        {filterMode
-          ? `Filter: ${filterText}█ (Esc to clear)`
-          : `j/k nav · r retry · R retry-failed · q quit · ${jobs} jobs · ${done}/${total} done · ${running} running · ${elapsed}${filterStr}`}
-      </Text>
+    <Box flexDirection="column">
+      <Text dimColor>{row1}</Text>
+      <Text dimColor>{row2}</Text>
     </Box>
   );
 }

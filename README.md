@@ -68,11 +68,22 @@ make bench
 | `k`/`↑` | Previous repo |
 | `g` | Jump to top |
 | `G` | Jump to bottom (Result item) |
+| `Space` | Toggle the Result summary in the preview without moving selection (any navigation clears it) |
+| `[` / `]` | Narrow / widen the left pane |
 | `r` / `Enter` | Retry selected failed repo |
 | `R` | Retry all failed repos |
 | `Tab` | Toggle focus: list ↔ preview |
 | `PgUp`/`PgDn` | Scroll preview |
 | `/` | Filter list by substring |
-| `Esc` | Clear filter / quit |
+| `Esc` | Clear filter |
 | `q` | Quit |
 | `Ctrl-C` | Quit (exit 130) |
+
+### Mouse
+
+ink has no mouse API, so SGR mouse reporting is enabled by hand and the raw
+sequences are parsed off stdin. Click a repo row to select it, scroll the wheel
+over the left pane to move the selection or over the right pane to scroll the
+preview, and drag the divider between the panes to resize. While running, the
+app captures the mouse, so native terminal text-selection is suspended until you
+quit.

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Box, Text, useApp, useInput, useWindowSize } from 'ink';
+import { Box, Text, useApp, useInput, useStdin, useWindowSize } from 'ink';
 import { RepoList } from './RepoList.tsx';
 import { PreviewPane } from './PreviewPane.tsx';
 import { StatusBar } from './StatusBar.tsx';
@@ -19,6 +19,10 @@ interface Props {
 }
 
 const PREVIEW_SCROLL_PAGE = 10;
+const DEFAULT_SPLIT = 0.4;
+const MIN_SPLIT = 0.2;
+const MAX_SPLIT = 0.7;
+const clampSplit = (ratio: number) => Math.min(MAX_SPLIT, Math.max(MIN_SPLIT, ratio));
 
 export function TuiApp({
   repos,
@@ -43,7 +47,21 @@ export function TuiApp({
   const [listScrollOffset, setListScrollOffset] = useState(0);
   const [userNavigated, setUserNavigated] = useState(false);
   const [previewFocused, setPreviewFocused] = useState(false);
+  const [splitRatio, setSplitRatio] = useState(DEFAULT_SPLIT);
+  const [showResultPreview, setShowResultPreview] = useState(false);
   const prevAllDoneRef = useRef(false);
+  // Geometry captured each render for mouse hit-testing, and live drag state.
+  const geomRef = useRef({
+    listTop: 5,
+    scrollOffset: 0,
+    numRepos: 0,
+    resultIndex: 0,
+    listHeight: 0,
+    leftPaneWidth: 0,
+    dividerCol: 0,
+    columns: 0,
+  });
+  const draggingRef = useRef(false);
 
   // Filtered repos
   const filteredRepos = filterText
@@ -54,10 +72,10 @@ export function TuiApp({
   const resultIndex = filteredRepos.length; // last item index
 
   // Layout computation
-  const leftPaneWidth = Math.floor(columns * 0.4);
+  const leftPaneWidth = Math.max(20, Math.floor(columns * splitRatio));
   const rightPaneWidth = columns - leftPaneWidth - 1; // -1 for divider
   const headerHeight = 2; // title + separator
-  const statusBarHeight = 1;
+  const statusBarHeight = 2; // two grouped hotkey rows
   const listHeight = rows - headerHeight - statusBarHeight - 2;
   const previewHeight = rows - headerHeight - statusBarHeight - 2;
 
@@ -129,9 +147,11 @@ export function TuiApp({
 
   // Auto-scroll preview when selected repo updates
   const selectedRepo = selectedIndex < filteredRepos.length ? filteredRepos[selectedIndex] : null;
-  const isResultItem = selectedIndex === resultIndex;
+  // The preview shows the Result summary when its row is selected OR the Space
+  // overlay is active (a temporary switch that any navigation clears).
+  const previewIsResult = showResultPreview || selectedIndex === resultIndex;
 
-  const previewLines = isResultItem
+  const previewLines = previewIsResult
     ? buildSummaryText(
         repos.map(r => ({ name: r.name, branch: r.branch, status: r.status })),
         worktrees,
@@ -155,6 +175,7 @@ export function TuiApp({
   const moveSelection = useCallback(
     (delta: number) => {
       setUserNavigated(true);
+      setShowResultPreview(false);
       setSelectedIndex(prev => {
         const next = Math.max(0, Math.min(totalItems - 1, prev + delta));
         ensureVisible(next, listHeight);
@@ -165,6 +186,121 @@ export function TuiApp({
     },
     [totalItems, listHeight],
   );
+
+  // Capture layout geometry every render so the raw mouse handler can hit-test.
+  // The list's first repo row sits below the bordered title (3 rows) and the
+  // left pane's top border (1) — so the first repo is at 1-based screen row 5.
+  geomRef.current = {
+    listTop: headerHeight + 3,
+    scrollOffset: listScrollOffset,
+    numRepos: filteredRepos.length,
+    resultIndex,
+    listHeight,
+    leftPaneWidth,
+    dividerCol: leftPaneWidth + 1,
+    columns,
+  };
+
+  // ink has no mouse API, so map raw SGR mouse reports to actions by hand.
+  const handleMouse = useCallback(
+    (button: number, col: number, row: number, isRelease: boolean) => {
+      const geom = geomRef.current;
+      const onLeftPane = col <= geom.leftPaneWidth;
+
+      // Wheel: button 64 = up, 65 = down. Scroll list (left) or preview (right).
+      if (button === 64) {
+        if (onLeftPane) {
+          moveSelection(-1);
+        } else {
+          setAutoScroll(false);
+          setPreviewScrollOffset(prev => Math.max(0, prev - 3));
+        }
+        return;
+      }
+      if (button === 65) {
+        if (onLeftPane) {
+          moveSelection(1);
+        } else {
+          setAutoScroll(false);
+          setPreviewScrollOffset(prev => prev + 3);
+        }
+        return;
+      }
+
+      if (isRelease) {
+        draggingRef.current = false;
+        return;
+      }
+
+      // Motion with a button held (SGR sets bit 5 = 32): drag the divider.
+      if ((button & 32) !== 0) {
+        if (draggingRef.current && geom.columns > 0) {
+          setSplitRatio(clampSplit((col - 1) / geom.columns));
+        }
+        return;
+      }
+
+      // Left press (button 0).
+      if ((button & 3) === 0) {
+        if (Math.abs(col - geom.dividerCol) <= 1) {
+          draggingRef.current = true;
+          return;
+        }
+        if (!onLeftPane) return;
+        const rel = row - geom.listTop;
+        if (rel < 0) return;
+        const numVisible = Math.min(geom.numRepos - geom.scrollOffset, geom.listHeight);
+        if (rel < numVisible) {
+          // A repo row.
+          setUserNavigated(true);
+          setShowResultPreview(false);
+          setSelectedIndex(geom.scrollOffset + rel);
+          setAutoScroll(true);
+          setPreviewScrollOffset(0);
+        } else if (rel === numVisible + 1) {
+          // The Result row (one separator line sits between the repos and it).
+          setUserNavigated(true);
+          setShowResultPreview(false);
+          setSelectedIndex(geom.resultIndex);
+          setAutoScroll(true);
+          setPreviewScrollOffset(0);
+        }
+      }
+    },
+    [moveSelection],
+  );
+
+  // Enable SGR mouse reporting on mount; disable on unmount.
+  useEffect(() => {
+    if (!process.stdout.isTTY) return;
+    process.stdout.write('\x1b[?1000h\x1b[?1002h\x1b[?1006h');
+    return () => {
+      process.stdout.write('\x1b[?1000l\x1b[?1002l\x1b[?1006l');
+    };
+  }, []);
+
+  // Parse raw SGR mouse sequences (\x1b[<btn;col;row(M|m)) off the stdin stream.
+  const { stdin } = useStdin();
+  useEffect(() => {
+    if (!stdin) return;
+    const onData = (data: Buffer | string) => {
+      const text = typeof data === 'string' ? data : data.toString('utf8');
+      const regex = /\x1b\[<(\d+);(\d+);(\d+)([Mm])/g;
+      let match: RegExpExecArray | null;
+      while ((match = regex.exec(text)) !== null) {
+        handleMouse(
+          Number(match[1]),
+          Number(match[2]),
+          Number(match[3]),
+          match[4] === 'm',
+        );
+      }
+    };
+    stdin.on('data', onData);
+    return () => {
+      stdin.off('data', onData);
+    };
+  }, [stdin, handleMouse]);
 
   useInput((input, key) => {
     // Filter mode input handling
@@ -200,6 +336,7 @@ export function TuiApp({
     }
     if (input === 'g') {
       setUserNavigated(true);
+      setShowResultPreview(false);
       setSelectedIndex(0);
       setListScrollOffset(0);
       setPreviewScrollOffset(0);
@@ -207,9 +344,26 @@ export function TuiApp({
     }
     if (input === 'G') {
       setUserNavigated(true);
+      setShowResultPreview(false);
       setSelectedIndex(resultIndex);
       ensureVisible(resultIndex, listHeight);
       setPreviewScrollOffset(0);
+      return;
+    }
+
+    // Space: toggle the Result summary overlay without moving selection.
+    if (input === ' ') {
+      setShowResultPreview(prev => !prev);
+      return;
+    }
+
+    // Resize the split: [ narrows the left pane, ] widens it.
+    if (input === '[') {
+      setSplitRatio(prev => clampSplit(prev - 0.03));
+      return;
+    }
+    if (input === ']') {
+      setSplitRatio(prev => clampSplit(prev + 0.03));
       return;
     }
 
@@ -267,8 +421,9 @@ export function TuiApp({
       return;
     }
 
-    // Quit
-    if (input === 'q' || key.escape) {
+    // Quit (Esc is intentionally NOT a quit key — a stray Esc decoded from a
+    // mouse/query escape sequence would otherwise exit the app).
+    if (input === 'q') {
       const code = allDone ? (repos.some(r => r.status === 'failed') ? 1 : 0) : 2;
       onQuit(code);
       exit();
@@ -340,7 +495,7 @@ export function TuiApp({
         >
           <PreviewPane
             selectedRepo={selectedRepo}
-            isResultItem={isResultItem && !filterText}
+            isResultItem={previewIsResult && !filterText}
             repos={repos}
             worktrees={worktrees}
             previewScrollOffset={previewScrollOffset}
