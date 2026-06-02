@@ -8,6 +8,7 @@ import {
   discoverWorktrees,
   getBranch,
   isDirty,
+  killAllPulls,
   pullRepo,
   Semaphore,
 } from './git/runner.ts';
@@ -182,6 +183,25 @@ async function runTui(options: CliOptions): Promise<number> {
     let exitCode = 0;
     let inkInstance: ReturnType<typeof render> | null = null;
     let renderCallback: ((repos: RepoState[], worktrees: WorktreeEntry[]) => void) | null = null;
+    let finished = false;
+
+    // Single exit path. Kills any in-flight pulls so the event loop can drain,
+    // waits for ink to restore the terminal (leave alt-screen, show cursor),
+    // then resolves. Idempotent — safe to call from quit and from the
+    // all-pulls-settled handler.
+    function finish(code: number) {
+      if (finished) return;
+      finished = true;
+      exitCode = code;
+      killAllPulls();
+      const hasFailed = currentRepos.some(r => r.status === 'failed');
+      if (exitCode === 0 && hasFailed) exitCode = 1;
+      if (inkInstance) {
+        inkInstance.waitUntilExit().then(() => resolve(exitCode));
+      } else {
+        resolve(exitCode);
+      }
+    }
 
     function updateRepo(name: string, patch: Partial<RepoState>) {
       const idx = currentRepos.findIndex(r => r.name === name);
@@ -201,7 +221,7 @@ async function runTui(options: CliOptions): Promise<number> {
     }
 
     function handleQuit(code: number) {
-      exitCode = code;
+      finish(code);
     }
 
     function handleRetry(name: string) {
@@ -294,14 +314,10 @@ async function runTui(options: CliOptions): Promise<number> {
       ? Promise.resolve()
       : discoverWorktrees(dir).then(updateWorktrees);
 
-    Promise.all([...pullTasks.map(task => task()), worktreeTask]).then(() => {
-      // All done — wait for user to quit
-      inkInstance?.waitUntilExit().then(() => {
-        const hasFailed = currentRepos.some(r => r.status === 'failed');
-        if (exitCode === 0 && hasFailed) exitCode = 1;
-        resolve(exitCode);
-      });
-    });
+    // Run pulls + worktree discovery in the background. They update state via
+    // updateRepo/updateWorktrees; exit is driven solely by finish() (the quit
+    // path), so quitting mid-pull no longer waits for stragglers.
+    void Promise.all([...pullTasks.map(task => task()), worktreeTask]);
   });
 }
 

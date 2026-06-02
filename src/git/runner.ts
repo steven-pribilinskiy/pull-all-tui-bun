@@ -5,6 +5,24 @@ import type { RepoState, WorktreeEntry } from './types.ts';
 
 const RING_BUFFER_CAP = 10_000;
 
+// Every in-flight `git pull` child is tracked here so the quit path can kill
+// them. Without this, pressing `q` while a slow repo is still pulling leaves
+// Bun's event loop alive (awaiting proc.exited) for up to the full timeout —
+// the "hangs after q" bug.
+const activePulls = new Set<Bun.Subprocess>();
+
+/** Kill every in-flight git pull (SIGTERM). Called from the quit path. */
+export function killAllPulls(): void {
+  for (const proc of activePulls) {
+    try {
+      proc.kill();
+    } catch {
+      // already exited
+    }
+  }
+  activePulls.clear();
+}
+
 export function appendLines(existing: string[], newText: string): string[] {
   if (!newText) return existing;
   const incoming = newText.split('\n');
@@ -135,6 +153,7 @@ export async function pullRepo(
       stderr: 'pipe',
     },
   );
+  activePulls.add(proc);
 
   onUpdate(repoName, { status: 'running', pid: proc.pid });
 
@@ -165,6 +184,7 @@ export async function pullRepo(
 
   await Promise.all([drainStream(proc.stdout), drainStream(proc.stderr)]);
   const exitCode = await proc.exited;
+  activePulls.delete(proc);
 
   if (exitCode === 0) {
     const fullOutput = collectedLines.join('\n');

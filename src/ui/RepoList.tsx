@@ -10,6 +10,8 @@ interface Props {
   allDone: boolean;
   /** How many characters to reserve for repo name column */
   repoColWidth: number;
+  /** How many characters are available for the branch column */
+  branchColWidth: number;
   /** Visible height of the list pane */
   visibleHeight: number;
   scrollOffset: number;
@@ -22,6 +24,7 @@ export function RepoList({
   selectedIndex,
   spinFrame,
   repoColWidth,
+  branchColWidth,
   visibleHeight,
   scrollOffset,
   showResult,
@@ -43,10 +46,9 @@ export function RepoList({
         const glyph = statusGlyph(repo.status, spinFrame);
         const color = statusColor(repo.status);
 
-        // Truncate branch name to fit available space
-        const branchMaxLen = Math.max(4, repoColWidth - repo.name.length - 2);
-        const branch = repo.branch.length > branchMaxLen
-          ? repo.branch.slice(0, branchMaxLen - 1) + '…'
+        // Truncate branch to the real available branch-column width.
+        const branch = repo.branch.length > branchColWidth
+          ? repo.branch.slice(0, Math.max(1, branchColWidth - 1)) + '…'
           : repo.branch;
 
         const nameStr = repo.name.padEnd(repoColWidth);

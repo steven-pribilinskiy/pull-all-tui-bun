@@ -68,6 +68,13 @@ export function TuiApp({
   );
   const repoColWidth = maxNameLen;
 
+  // Branch column = whatever's left in the left pane after the border (2) +
+  // padding (2) chrome, the status glyph + space (2), the padded name column,
+  // the name/branch separator space (1), and the reserved selection arrow (2).
+  // Derived from the real pane width — the old formula used the name column,
+  // which truncated long-named repos' branches to ~4 chars.
+  const branchColWidth = Math.max(3, leftPaneWidth - 4 - 2 - repoColWidth - 1 - 2);
+
   // Auto-select first running repo on launch
   useEffect(() => {
     if (!userNavigated) {
@@ -309,6 +316,7 @@ export function TuiApp({
             spinFrame={spinFrame}
             allDone={allDone}
             repoColWidth={repoColWidth}
+            branchColWidth={branchColWidth}
             visibleHeight={listHeight}
             scrollOffset={listScrollOffset}
             showResult={!filterText}
