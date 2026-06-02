@@ -36,6 +36,10 @@ export function PreviewPane({
   } else if (selectedRepo) {
     const pidStr = selectedRepo.pid !== undefined ? `pid ${selectedRepo.pid}` : 'pid —';
     header = `${selectedRepo.name} · ${selectedRepo.status} · ${pidStr}`;
+    const elapsedSec = repoElapsedSec(selectedRepo);
+    if (elapsedSec !== null) {
+      header += ` · ${elapsedSec.toFixed(1)}s`;
+    }
     bodyLines = selectedRepo.lines;
   } else {
     header = '— · — · pid —';
@@ -76,6 +80,13 @@ export function PreviewPane({
       </Box>
     </Box>
   );
+}
+
+// Live elapsed for a repo: final elapsedMs once finished, else ticking from startMs.
+function repoElapsedSec(repo: RepoState): number | null {
+  if (repo.elapsedMs !== undefined) return repo.elapsedMs / 1000;
+  if (repo.startMs !== undefined) return (Date.now() - repo.startMs) / 1000;
+  return null;
 }
 
 // Simple ANSI strip for length calculation

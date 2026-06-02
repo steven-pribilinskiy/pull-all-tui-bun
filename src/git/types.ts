@@ -13,6 +13,8 @@ export interface RepoState {
   pid: number | undefined;
   lines: string[];
   exitCode: number | undefined;
+  startMs?: number;
+  elapsedMs?: number;
 }
 
 export interface WorktreeEntry {
@@ -26,4 +28,6 @@ export interface CliOptions {
   noTui: boolean;
   noWorktrees: boolean;
   timeoutSec: number;
+  profile: boolean;
+  profileOut?: string;
 }

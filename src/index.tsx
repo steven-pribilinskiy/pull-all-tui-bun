@@ -13,6 +13,7 @@ import {
   Semaphore,
 } from './git/runner.ts';
 import { printRepoResult, printSummary } from './app/plainOutput.ts';
+import { emitProfileReport } from './app/profile.ts';
 import { buildSummaryText } from './git/parser.ts';
 import type { RepoState, WorktreeEntry, CliOptions } from './git/types.ts';
 
@@ -28,6 +29,8 @@ function parseArgs(): CliOptions {
   let noTui = false;
   let noWorktrees = false;
   let timeoutSec = envTimeout ?? 30;
+  let profile = Boolean(process.env.PULL_PROFILE);
+  let profileOut: string | undefined;
 
   for (let idx = 0; idx < args.length; idx++) {
     const arg = args[idx];
@@ -39,6 +42,11 @@ function parseArgs(): CliOptions {
       jobs = parseInt(args[++idx] ?? '4', 10);
     } else if (arg === '--timeout') {
       timeoutSec = parseInt(args[++idx] ?? '30', 10);
+    } else if (arg === '--profile') {
+      profile = true;
+    } else if (arg === '--profile-out') {
+      profileOut = args[++idx];
+      profile = true;
     } else if (arg === '--version') {
       process.stdout.write('pull-all-tui 1.0.0\n');
       process.exit(0);
@@ -49,8 +57,11 @@ function parseArgs(): CliOptions {
           '  --no-tui            plain streaming output\n' +
           '  --no-worktrees      skip worktree discovery\n' +
           '  --timeout SEC       per-pull timeout (default: 30)\n' +
+          '  --profile           emit per-repo timing report (slowest first)\n' +
+          '  --profile-out FILE  write profile report to FILE (implies --profile)\n' +
           '  --version\n' +
-          '  -h, --help\n',
+          '  -h, --help\n\n' +
+          '  Env: PULL_PROFILE=1 enables profiling.\n',
       );
       process.exit(0);
     } else if (!arg.startsWith('-')) {
@@ -58,14 +69,14 @@ function parseArgs(): CliOptions {
     }
   }
 
-  return { dir, jobs, noTui, noWorktrees, timeoutSec };
+  return { dir, jobs, noTui, noWorktrees, timeoutSec, profile, profileOut };
 }
 
 /**
  * Plain (no-TTY) mode: stream output byte-identical to bash reference.
  */
 async function runPlain(options: CliOptions): Promise<number> {
-  const { dir, jobs, noWorktrees, timeoutSec } = options;
+  const { dir, jobs, noWorktrees, timeoutSec, profile, profileOut } = options;
 
   process.stdout.write(`🔄 Pulling all repositories in ${basename(dir)}...\n`);
 
@@ -110,10 +121,12 @@ async function runPlain(options: CliOptions): Promise<number> {
   const pullTasks = repoNames.map(name => async () => {
     const state = repoStates.get(name)!;
     if (state.status === 'skipped') {
+      repoStates.set(name, { ...state, startMs: Date.now(), elapsedMs: 0 });
       completionOrder.push(name);
       return;
     }
 
+    const startMs = Date.now();
     await semaphore.acquire();
     try {
       await pullRepo(dir, name, timeoutSec, (repoName, patch) => {
@@ -121,6 +134,8 @@ async function runPlain(options: CliOptions): Promise<number> {
         repoStates.set(repoName, { ...current, ...patch });
       });
     } finally {
+      const current = repoStates.get(name)!;
+      repoStates.set(name, { ...current, startMs, elapsedMs: Date.now() - startMs });
       semaphore.release();
       completionOrder.push(name);
     }
@@ -138,6 +153,10 @@ async function runPlain(options: CliOptions): Promise<number> {
   const worktrees = await worktreePromise;
   printSummary(dir, Array.from(repoStates.values()), worktrees);
 
+  if (profile) {
+    await emitProfileReport(Array.from(repoStates.values()), profileOut);
+  }
+
   const hasFailed = Array.from(repoStates.values()).some(r => r.status === 'failed');
   return hasFailed ? 1 : 0;
 }
@@ -146,7 +165,7 @@ async function runPlain(options: CliOptions): Promise<number> {
  * TUI mode: interactive ink app.
  */
 async function runTui(options: CliOptions): Promise<number> {
-  const { dir, jobs, noWorktrees, timeoutSec } = options;
+  const { dir, jobs, noWorktrees, timeoutSec, profile, profileOut } = options;
 
   // Discover repos first (fast)
   const repoNames = await discoverRepos(dir);
@@ -175,6 +194,7 @@ async function runTui(options: CliOptions): Promise<number> {
     pid: undefined,
     lines: [],
     exitCode: undefined,
+    elapsedMs: dirtyResults[idx] ? 0 : undefined,
   }));
 
   return new Promise<number>(resolve => {
@@ -196,10 +216,18 @@ async function runTui(options: CliOptions): Promise<number> {
       killAllPulls();
       const hasFailed = currentRepos.some(r => r.status === 'failed');
       if (exitCode === 0 && hasFailed) exitCode = 1;
+      const emitReport = async () => {
+        if (profile) {
+          await emitProfileReport(currentRepos, profileOut);
+        }
+      };
       if (inkInstance) {
-        inkInstance.waitUntilExit().then(() => resolve(exitCode));
+        inkInstance
+          .waitUntilExit()
+          .then(emitReport)
+          .then(() => resolve(exitCode));
       } else {
-        resolve(exitCode);
+        emitReport().then(() => resolve(exitCode));
       }
     }
 
@@ -225,11 +253,20 @@ async function runTui(options: CliOptions): Promise<number> {
     }
 
     function handleRetry(name: string) {
-      updateRepo(name, { status: 'queued', lines: [], pid: undefined, exitCode: undefined });
+      const startMs = Date.now();
+      updateRepo(name, {
+        status: 'queued',
+        lines: [],
+        pid: undefined,
+        exitCode: undefined,
+        startMs,
+        elapsedMs: undefined,
+      });
       // Re-run pull for this repo
       const semaphore = new Semaphore(1);
       semaphore.acquire().then(() => {
         pullRepo(dir, name, timeoutSec, updateRepo).finally(() => {
+          updateRepo(name, { elapsedMs: Date.now() - startMs });
           semaphore.release();
         });
       });
@@ -238,12 +275,21 @@ async function runTui(options: CliOptions): Promise<number> {
     function handleRetryAll() {
       const failedRepos = currentRepos.filter(r => r.status === 'failed');
       for (const repo of failedRepos) {
-        updateRepo(repo.name, { status: 'queued', lines: [], pid: undefined, exitCode: undefined });
+        updateRepo(repo.name, {
+          status: 'queued',
+          lines: [],
+          pid: undefined,
+          exitCode: undefined,
+          startMs: Date.now(),
+          elapsedMs: undefined,
+        });
       }
       const semaphore = new Semaphore(jobs);
       for (const repo of failedRepos) {
+        const startMs = Date.now();
         semaphore.acquire().then(() => {
           pullRepo(dir, repo.name, timeoutSec, updateRepo).finally(() => {
+            updateRepo(repo.name, { elapsedMs: Date.now() - startMs });
             semaphore.release();
           });
         });
@@ -301,10 +347,13 @@ async function runTui(options: CliOptions): Promise<number> {
     const pullTasks = repoNames
       .filter((_, idx) => !dirtyResults[idx])
       .map(name => async () => {
+        const startMs = Date.now();
+        updateRepo(name, { startMs });
         await semaphore.acquire();
         try {
           await pullRepo(dir, name, timeoutSec, updateRepo);
         } finally {
+          updateRepo(name, { elapsedMs: Date.now() - startMs });
           semaphore.release();
         }
       });
